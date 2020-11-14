@@ -1,0 +1,552 @@
+---
+title: "Statistical Results for SRH paper"
+author: "Zongchao Liu; Zhi Lin"
+date: "10/7/2020"
+output: 
+    html_document:
+      toc: true 
+      toc_float: true
+      code_folding: "hide"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(arsenal)
+library(knitr)
+library(sjPlot)
+library(sjmisc)
+library(sjlabelled)
+library(caret)
+library(ranger)
+library(lime)
+library(bartMachine)
+```
+
+# 准备工作
+
+研究背景，方法见overleaf链接:https://www.overleaf.com/project/5f9c70a12a83e10001ec6384
+
+关于问卷重要的信息：
+
+- 没有过性行为的人群，直接跳过了回答“是否有偶遇性行为”。因此这个问题回答缺失的人，统一被认为没有过偶遇性行为。
+
+# 导入数据
+
+```{r, message=FALSE,warning=FALSE}
+NCSS_SRH = read_csv('./data/2020NCSS-SRH_0228cleaned.csv')
+var_ref = names(NCSS_SRH) %>% as.tibble()
+```
+
+
+# Helper Functions
+
+```{r}
+var_names = names(NCSS_SRH)
+
+#用于查看单列变量
+search = function(df,idx){
+  df %>%
+    select(idx)
+}
+
+# 用于查看单个分类变量粗略计数结果
+var_summary = function(df = NCSS_SRH, idx){
+  var_name = var_names[idx]
+  df %>%
+    select(!!as.symbol(var_name)) %>%
+    group_by(!!as.symbol(var_name)) %>%
+    summarise(count = n()) %>%
+    kable()
+}
+
+# 用于根据单个分类变量，计算各组偶然性行为发生率
+prevalence_by = function(df, idx, knit=TRUE){
+  temp = df %>%
+  group_by(!!as.symbol(var_names[idx])) %>%
+  summarise(occur = sum(`B15.是否发生过偶遇性行为(约炮、一夜情、买春等)`==1),
+            total = n(),
+            prevalence = occur/total)
+  if(knit){temp %>% kable()}
+  else{return(temp)}
+}
+
+
+# 筛选人群（偶遇性行为没有填写的subjects，真实response为无偶遇性行为）
+sub_pop = 
+  NCSS_SRH %>%
+  #filter(is.na(!!as.symbol(var_names[242])) == F) %>%
+  mutate(`高校所在地域(东中西部)` = as.character(`高校所在地域(东中西部)`),
+         `P3.是否本科生` = as.character(`P3.是否本科生`),
+         `C6.是否饮酒` = as.character(`C6.是否饮酒`),
+         `D10.是否独生子女` = as.character(`D10.是否独生子女`)) %>%
+  mutate(`B15.是否发生过偶遇性行为(约炮、一夜情、买春等)` = ifelse(is.na(`B15.是否发生过偶遇性行为(约炮、一夜情、买春等)`), 0, `B15.是否发生过偶遇性行为(约炮、一夜情、买春等)`)) %>%
+           mutate(`B15.是否发生过偶遇性行为(约炮、一夜情、买春等)` = factor(`B15.是否发生过偶遇性行为(约炮、一夜情、买春等)`))
+           
+  
+#class(sub_pop$`B15.是否发生过偶遇性行为(约炮、一夜情、买春等)`)
+#var_summary(idx=136)
+```
+
+# 结果
+
+*Note:* 以下所有表格都是非正式表格，需要在excel/word/latex重新制作才能达到publication的要求，但可以先把数据复制出来。
+
+结果分为四个的section:
+
+- Basic Demographics: 包含基本人口学特征
+
+- Prevalence: 不同维度讨论偶遇性行为的发生率
+
+- Characteristics: 计划展示sexual knowledge, sexual behaviors, attitudes towards sexual health, Contraception 的内容
+
+- Encoding Charateristics:
+
+考虑到我们手上的变量太多，暂时计划不使用logistic回归，因为它有很强的assumptions，可能会令我们难以解释为什么要选某些变量做logistic 回归（虽然简单的logistic回归也做了，取需）。目前计划使用非监督学习的方法将人群分组，计算得到的每组人群中偶遇性行为的发生率，再在每个亚组人群中具体观察我们在 Characteristics 中所展示的变量，这样可以获得中国大学生人群中hookup发生可能性最高的一群人的profile。
+
+
+## Basic Demographics
+
+- 初步选出的人口学变量: c(7,8,13,14,519,159,534,536,469,467,131,242,533,511,525, 556)
+分别是：学校地域，高校层次，是否本科生，生理性别，月支出，感情状况，父/母教育程度，吸烟，饮酒，性知识的分，是否独生子女，农村/城镇常住，是否离异家庭。 
+
+- `附录`有问卷所有变量名，如果有想法增删/替换人口学特征变量, 可以参考`附录1`。
+
+我们以`"B15.是否发生过偶遇性行为(约炮、一夜情、买春等)"` 的应答为标准筛选样本。
+54580/54580 人填写了该问题。在这54580人中共有2199人发生过偶然性行为，发生率=`r 2199/54580`。其他具体结果见下表。
+
+```{r, include=FALSE}
+unique(search(NCSS_SRH, 536))
+```
+
+
+```{r}
+# demograpcs
+demographics = sub_pop %>%
+  select(c(7,8,13,14,519,159,534,536,469,467,131,242,533,511,525, 556)) # 242 indicates sexual com
+
+table = tableby(`B15.是否发生过偶遇性行为(约炮、一夜情、买春等)` ~ ., data = demographics, test = FALSE)
+summary(table, title = "Charateristics of Students") %>% kable()
+```
+
+## Prevalence
+
+本部分展示hookup的发生率。
+
+```{r, include=FALSE}
+unique(search(sub_pop, 556))
+prevalence_by(sub_pop, 556)
+```
+
+- 初步计划根据学校地域，性别，学校层次，常住地区，生活习惯（烟酒）进行分层，是否独生，精神状况，是否家庭离异, 计算hookup发生率。
+
+- `附录`有问卷所有变量名，如果有想法增删/替换分层变量, 可以参考`附录1`。
+
+分层后的结果见下表，最终需要整合成一个表格。在整合表格的时候要注意缺失值, 整合好后如有需要可以考虑对率做假设检验：
+
+```{r}
+# prevalence
+## by 学校地域
+prevalence_by(df = sub_pop, idx = 7)
+## by 性别
+prevalence_by(df = sub_pop, idx = 14)
+## by 办学层次
+prevalence_by(df = sub_pop, idx = 8)
+## by 精神状况
+temp = sub_pop %>% mutate(`C10.抑郁量表CES-D-10总分(≥10可认为有抑郁症状)` = ifelse(`C10.抑郁量表CES-D-10总分(≥10可认为有抑郁症状)` >= 10, "抑郁", "正常"))
+prevalence_by(df = temp, idx = 511)
+rm(temp)
+##by 吸烟
+prevalence_by(df = sub_pop, idx = 469)
+##by 饮酒
+prevalence_by(df = sub_pop, idx = 467)
+##by 是否独生
+prevalence_by(df = sub_pop, idx = 533)
+##by 是否家庭离异
+prevalence_by(df = sub_pop, idx = 556)
+##by 常住地区
+prevalence_by(df = sub_pop, idx = 525)
+```
+
+## Characteristics
+
+本部分展示 sexual knowledge, sexual behaviors, attitudes towards sexual health, Contraception 的相关内容。
+
+- sexual knowledge: 关于性知识的变量有很多，这里纳入了`知识测验`，`知识得分`，以及`学习性知识的意愿`的变量。我们可以由此看出人群的的性知识水平差异，以及`知识得分`是否“对得起”`学习性知识的意愿`（可用于衡量性教育工作是否足够成功）。另外，通过观察性知识测验每一题的回答情况，我们也可以得出一些结论，这或许可以给性教育的policy maker 一些implications。
+
+- sexual behaviors: 纳入了亲密性行为的记录；首次性行为相关变量（仅在有过性行为的人群中比较偶遇性行为与普通性行为的行为差异）。Note: 有4人`B7.首次发生插入式性行为年龄(周岁)`>=30` 人年龄在30岁以上，其中3人年龄在100以上，太秀了，年龄>=30的这里当作missing value哈。
+
+- attitudes towards sexual health: 发现觉得有意义的就挑着写。
+
+- Contraception: 纳入了避孕方法相关变量
+
+可参考：Wang, Y., Chen, M., Tan, S., Qu, X., Wang, H., Liang, X., ... & Tang, K. (2020). The socioeconomic and lifestyle determinants of contraceptive use among Chinese college students: a cross-sectional study. Reproductive health, 17(1), 1-11.
+
+### sexual knowledge
+
+```{r}
+# 知识得分分布
+sub_pop %>%
+  select(131,242) %>%
+  mutate(`B15.是否发生过偶遇性行为(约炮、一夜情、买春等)`=as.character(`B15.是否发生过偶遇性行为(约炮、一夜情、买春等)`),
+         ) %>%
+  ggplot(aes(x =`A16.性知识得分(满分9)`, y =..density.., fill=`B15.是否发生过偶遇性行为(约炮、一夜情、买春等)`))+
+  geom_histogram() +
+  geom_density(alpha =.7,aes(color = `B15.是否发生过偶遇性行为(约炮、一夜情、买春等)`)) +
+  facet_grid(`B15.是否发生过偶遇性行为(约炮、一夜情、买春等)` ~.) +
+  theme_bw() +
+  theme(legend.position = "none") +
+  labs(x = "Score", title = "SRH Score Distribution across Two Groups of Students")+
+  ggsci::scale_fill_lancet()
+```
+
+```{r}
+awareness_correctness = sub_pop %>%
+  select(14,242,111,113:121) %>%
+  mutate(`是否认为自己有必要了解避孕知识` = recode(`是否认为自己有必要了解避孕知识`,"1"="有必要","2"="无必要"))
+  
+
+awareness_table = tableby(`B15.是否发生过偶遇性行为(约炮、一夜情、买春等)` ~ ., data = awareness_correctness[,-3])
+summary(awareness_table, title = "Charateristics of Students") %>% kable()
+
+```
+
+### sexual behaviors
+
+```{r}
+idx =  which(str_detect(var_names, "(发生过亲密行为)")==TRUE)
+
+# 亲密性行为(研究人群为全体人群)
+behavior_1 =  sub_pop %>%
+  select(idx,242) %>%
+  select(-seq(2,28,2))
+
+# 首次性行为相关(研究人群为有过性行为的人)
+behavior_2 =  sub_pop %>%
+  select(213:240, 242) %>%
+    mutate(`B7.首次发生插入式性行为年龄(周岁)` = as.numeric(`B7.首次发生插入式性行为年龄(周岁)`)) %>%
+  filter(is.na(`B7.首次发生插入式性行为年龄(周岁)`)==F) %>%
+  filter(`B7.首次发生插入式性行为年龄(周岁)`<=30) %>%
+  select(-c(2,3,8:12)) %>%
+  select(-4,-7) %>%
+  select(1:3, 20)
+```
+
+
+```{r}
+# 表格
+
+## 亲密性行为
+behavior_table_1 = tableby(`B15.是否发生过偶遇性行为(约炮、一夜情、买春等)` ~ ., data = behavior_1, test = T)
+summary(behavior_table_1, title = "Charateristics of Students") %>% kable()
+
+## 首次性行为相关(以下研究人群为有过性行为的人)
+behavior_table_2 = tableby(`B15.是否发生过偶遇性行为(约炮、一夜情、买春等)` ~ ., data = behavior_2, test = T)
+summary(behavior_table_2, title = "Charateristics of Students") %>% kable()
+```
+
+### attitudes towards sexual health: 
+
+- 性态度 column index: seq(132,155,2)
+
+- 性态度的变量并不是不是每一个都值得讨论，先找最有现实意义的写。比如`网络使交友更加广泛而容易，也导致一夜情更普遍`，这个题大家普遍都同意，可以侧面说明网络交友对hookup的影响，但两组人`非常同意`的比例差距悬殊（hookup的人更同意），体现了hookup对网络交友的依赖性。
+
+```{r}
+# 性态度
+attitude = sub_pop %>%
+  select(seq(132,155,2), 242)
+```
+
+```{r}
+# 表格
+attitude_table_1 = tableby(`B15.是否发生过偶遇性行为(约炮、一夜情、买春等)` ~ ., data = attitude, test = T)
+summary(attitude_table_1, title = "Charateristics of Students") %>% kable()
+```
+
+### Contraception
+
+以下结果直接看有点难懂，可以参考 `The socioeconomic and lifestyle determinants of contraceptive use among Chinese college students: a cross-sectional study`（https://www.ncbi.nlm.nih.gov/pmc/articles/PMC7433035/#CR8） 的table 2. 内容大致一致，只不过male vs female 变成了 never hookup vs hookup（52381 vs 2199）:
+
+```{r}
+contraception = sub_pop %>%
+  select(c(42,93,109,227,273,275,289,300,310,325,327,329:331,579),242)
+
+split_options = function(string){
+  term = str_split(string, pattern = "┋")
+  return(term)
+}
+
+# Awareness and use of different contraceptive methods among Chinese college students
+method_aware = contraception %>% select(2, 16)  %>%
+  mutate(answer = map(`A14.知道的避孕方法(可多选)`, split_options)) %>%
+  select(2,3)
+
+method_aware_hookup = method_aware %>% filter(`B15.是否发生过偶遇性行为(约炮、一夜情、买春等)` == 1)
+method_aware_nothookup = method_aware %>% filter(`B15.是否发生过偶遇性行为(约炮、一夜情、买春等)` == 0)
+
+
+res_1 = unlist(method_aware_hookup$answer)
+res_1[str_detect(res_1,"其他")==TRUE] = "其他"
+res_2 = unlist(method_aware_nothookup$answer)
+res_2[str_detect(res_2,"其他")==TRUE] = "其他"
+
+# hookup == 1
+table(res_1)
+# hookup == 0
+table(res_2)
+
+
+# 最近一次性行为 避孕方式使用
+
+last_sex = sub_pop %>%
+  select(299,242) %>%
+  na.omit() %>%
+  mutate(answer = map(`B26.最近一次性行为采用的避孕方法(可多选)`, split_options)) %>%
+  select(2,3) 
+
+# 最近一次性行为 避孕方式使用 /results in table format
+res_1ast_sex = unlist(last_sex$answer)
+res_1ast_sex[str_detect(res_1ast_sex,"其他")==TRUE] = "其他"
+table(res_1ast_sex)
+table(res_1ast_sex)/nrow(last_sex)
+```
+
+
+## Encoding Charateristics
+
+本部分中我们希望总结出中国大学生中hookup人群的一些共性，包括人口学特征，对性的认知，看法，态度等。虽然一些人口学特征已经被证实和hookup有强相关性，但`认知，看法，态度`与hookup动机的关系还难以量化（因为关于`认知，看法，态度`的题目问的太离散了）。因此，在总结共性之前，我们首先需要确证 `认知，看法，态度`与hookup的动机有强相关性。在这个假设成立后，我们才能完整地总结出这些共性。
+
+- 为什么不直接用logistic回归拟合？
+
+我们假设`认知，看法，态度`与hookup的动机有强相关性，但是问卷里对于认知，看法，态度的变量太多了，且对于同一个回答者来说，回答的题目都是内部相关的。logistic回归不能很好的handle这个问题。我的想法是先忽略outcome，仅利用`认知，看法，态度` 对全体人群聚类。这样每一个人将会获得一个对应自己所在cluster的label，这个label抽象的涵盖了某一类人的`认知，看法，态度`。随后，我们将这个label与其余的一些常规人口学变量一起丢进具有变量选择能力的机器学习模型，进行训练，就可以比较这个label与其他变量对outcome的相对重要性。如果label的重要性与其他变量旗鼓相当，那说明我们的假设是成立的。我们可以就继续讨论hookup高发生率人群在`认知，看法，态度`的一些共性，以及他们的人口学特征。这样便达到了encoding charateristics的目的。
+
+
+分析过程分为两步：
+
+- 1. 对`认知，看法，态度` 相关变量做k-means clustering => 获取label
+
+- 2. random forest 比较label与其他变量的相对重要性，确证我们的假设
+
+- 3. 总结共性
+
+### logistic 回归
+
+- 未分层
+
+- 男/女分层
+
+```{r}
+reg = sub_pop %>%
+  select(c(7,8,12,14,519,159,469,467,131,242,533,511)) %>%
+  mutate(`C7.吸烟情况` = factor(`C7.吸烟情况`),
+         `B15.是否发生过偶遇性行为(约炮、一夜情、买春等)` = factor(`B15.是否发生过偶遇性行为(约炮、一夜情、买春等)`),
+         `D4.过去12个月平均每月支出(元,不含学校规定缴费项目)` = ifelse(`D4.过去12个月平均每月支出(元,不含学校规定缴费项目)` < 1500, "<1500", ifelse(
+           1500 <= `D4.过去12个月平均每月支出(元,不含学校规定缴费项目)` & `D4.过去12个月平均每月支出(元,不含学校规定缴费项目)` <2500, "1500~2500", ">=2500"
+         )),
+          `D4.过去12个月平均每月支出(元,不含学校规定缴费项目)` = factor(`D4.过去12个月平均每月支出(元,不含学校规定缴费项目)`, levels = c("<1500", "1500~2500",">=2500")))
+
+names(reg)
+
+fit = glm(`B15.是否发生过偶遇性行为(约炮、一夜情、买春等)` ~ ., data=reg, family = binomial(link = 'logit'))
+summary(fit)
+
+reg_male = reg %>%
+  filter(`P6.生理性别` == "男") %>%
+  select(-`P6.生理性别`)
+
+reg_female = reg %>%
+  filter(`P6.生理性别` == "女") %>%
+  select(-`P6.生理性别`)
+
+fit_male = glm(`B15.是否发生过偶遇性行为(约炮、一夜情、买春等)` ~ ., data=reg_male, family = binomial(link = 'logit'))
+summary(fit_male)
+fit_female = glm(`B15.是否发生过偶遇性行为(约炮、一夜情、买春等)` ~ ., data=reg_female, family = binomial(link = 'logit'))
+summary(fit_female)
+
+
+tab_model(fit)
+tab_model(fit_male)
+tab_model(fit_female)
+```
+
+### step 1
+
+k-means clustering 纳入的变量见 `附录2`。
+
+```{r fig.width=20, fig.height=20}
+library(factoextra)
+
+attitude = sub_pop %>%
+  mutate(id = 1:nrow(NCSS_SRH)) %>%
+    mutate(`高校办学层次` = factor(`高校办学层次`),
+         `高校办学层次` = as.numeric(`高校办学层次`),
+         `P6.生理性别` = factor(`P6.生理性别`),
+         `P6.生理性别` = as.numeric(`P6.生理性别`),
+         `实足年龄(周岁)` = as.numeric(as.integer(`实足年龄(周岁)`) )) %>%
+  select(id,41,42,43,49,50,51,52,53,67,69,71,72,80,89,141, 133,135,137,139,141,143,145,147,149,151,153,155,157,160,161,162,169,171,175,178,182,184,186,188,192,193,195,196,198, 199,201,203,205,207,209,211,212,268,270,272,460,464,467,470,489,512,515, 526, 535, 537) %>%
+  select(id, everything()) 
+
+cluster_var = names(attitude)
+ 
+attitude[is.na(attitude)] = 0
+attitude = sapply(attitude, as.numeric) %>% as.data.frame()
+
+set.seed(1)
+km = kmeans(na.omit(attitude[,-1]), centers =  3)
+
+km_vis = fviz_cluster(list(data = attitude, cluster = km$cluster),ellipse.type = "convex",geom =c("point","text"),labelsize = 0)+ labs(title = "K-means") + theme_bw()
+km_vis
+clustered = cbind(km$cluster, NCSS_SRH) %>% rename("cluster" = "km$cluster")
+
+## 查询
+cluster_analysis = function(df = clustered){
+  df %>% 
+    group_by(cluster) %>%
+    mutate(`B15.是否发生过偶遇性行为(约炮、一夜情、买春等)` = ifelse(is.na(`B15.是否发生过偶遇性行为(约炮、一夜情、买春等)`), 0, `B15.是否发生过偶遇性行为(约炮、一夜情、买春等)`)) %>%
+    summarise(prevalence = sum(`B15.是否发生过偶遇性行为(约炮、一夜情、买春等)` == 1)/n())
+}
+
+cluster_analysis()
+
+clustered_id = clustered %>% select(1,2)
+```
+
+### step 2
+
+```{r}
+set.seed(1)
+cluster_pop = sub_pop %>%
+  left_join(., clustered_id) %>%
+  select(cluster, everything())
+
+  
+BART_data = cluster_pop %>%
+  select(1, c(7,8,13,14,519,159,534,536,469,466,131,533,511,525, 556)+1,243)
+
+BART_names = names(BART_data)
+names(BART_data) = c("x1","x2","x3","x4","x5","x6","x7","x8","x9","x10","x11","x12","x13","x14","x15","x16","y")
+
+BART_data = BART_data %>%
+  mutate(y = ifelse(y==1, "Y","N"),
+         y = ifelse(is.na(y), "N", y))
+
+
+
+BART_hk = BART_data %>%
+  filter(y == "Y")
+BART_nhk = BART_data %>%
+  filter(y == "N") %>%
+  .[,]
+
+
+BART_train = rbind(BART_nhk, BART_hk) %>% 
+  filter(is.na(x13)==FALSE) %>%
+  #mutate(x1 = factor(x1)) %>%
+  mutate(x8 = factor(x8, levels = c("不知道", "小学以下及文盲", "小学", "初中" ,"高中/中专/职高", "大学专科", "大学本科", "硕士及以上")),
+         x9 = factor(x9, levels = c("不知道", "小学以下及文盲", "小学", "初中" ,"高中/中专/职高", "大学专科", "大学本科", "硕士及以上")),
+         x10 = factor(x10, levels = c("从不吸烟", "过去吸烟，但目前已不抽", "现在吸烟")),
+         x11 = factor(x11)
+         )
+
+BART_train %>%
+  filter(x1 == 1)
+
+ctrl = trainControl(method = "cv", number = 5,
+                    classProbs = TRUE,
+                    summaryFunction = twoClassSummary,
+                    sampling = "down")
+
+tgrid = expand.grid(
+  .mtry = 2:16,
+  .splitrule = "gini",
+  .min.node.size = c(100)
+)
+
+set.seed(1)
+trRow = createDataPartition(BART_train$y, p = 0.8, list = FALSE, times = 1)
+rf.fit = train(y~.-x1, 
+               data = BART_train[trRow,],
+               method = "ranger",
+               trControl = ctrl,
+               tuneGrid = tgrid,
+               num.trees = 100,
+               importance = "permutation") 
+
+ggplot(rf.fit, highlight = T) + 
+  theme_bw() +
+  labs(title = "Tuning parameters for Random Forest")
+
+
+#length(pred.rf)
+#nrow(BART_train[trRow,])
+
+pred.rf = predict(rf.fit, newdata = BART_train[-trRow,])
+confusionMatrix(data = factor(pred.rf,levels = c("N","Y")),
+                       reference = factor(BART_train[-trRow,]$y),
+                       positive = "Y")
+```
+
+下图 `case1` 为 没有hookup experience， `case2` 为有～
+
+```{r}
+set.seed(1)
+rf.final = ranger(y ~ ., 
+                  BART_train, 
+                  mtry = rf.fit$bestTune$mtry, 
+                  splitrule = "gini",
+                  min.node.size = rf.fit$bestTune$min.node.size,
+                  num.trees = 100,
+                  importance = "permutation")
+
+# var importance
+vip::vip(rf.final) + theme_bw() + ggtitle("Variable Importance - RF")
+barplot(sort(ranger::importance(rf.final), decreasing = FALSE),
+      las = 2, 
+      horiz = TRUE, 
+      cex.names = 0.6,
+      col = colorRampPalette(colors = c("black","gold"))(20))
+
+
+## explain prediction
+new_obs = BART_train[c(1,3001),]
+explainer.rf = lime(BART_train, rf.fit)
+explanation.rf = lime::explain(new_obs, explainer.rf, n_features = 13, labels = "Y")
+
+plot_features(explanation.rf)
+plot_explanations(explanation.rf)
+# attention!!! => actual result: case 1 is Y, case 2 is N
+
+tibble(index = c("x1","x2","x3","x4","x5","x6","x7","x8","x9","x10","x11","x12","x13","x14","x15","x16","y"),
+       var = BART_names) %>%
+  kable()
+```
+
+### bartMachine
+
+```{r}
+x = BART_train[,-17] %>% as.data.frame()
+bart.fit = build_bart_machine(X = x, 
+                              y = factor(BART_train$y),
+                              num_trees = 100, 
+                              num_burn_in = 500,
+                              num_iterations_after_burn_in = 1000)
+
+```
+
+
+# 附录
+
+## 附录1. 全体变量清单
+
+```{r}
+var_names %>% kable()
+```
+
+## 附录2. 纳入k-means clustering 的变量清单
+
+```{r}
+tibble(index = c("x1","x2","x3","x4","x5","x6","x7","x8","x9","x10","x11","x12","x13","x14","x15","x16","y"),
+       var = BART_names) %>%
+  kable()
+```
+
